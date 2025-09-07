@@ -1,9 +1,7 @@
-import React, { useState, createContext, useContext } from 'react';
+import React, { useState, createContext, useContext, useCallback, useMemo } from 'react';
 
-// Grid Context for managing global state
 const GridContext = createContext();
 
-// Hook for using grid context
 export const useGrid = () => {
   const context = useContext(GridContext);
   if (!context) {
@@ -12,68 +10,18 @@ export const useGrid = () => {
   return context;
 };
 
-// Smart collision detection
-const hasCollision = (item1, item2) => {
+const hasGridCollision = (item1, item2) => {
+  if (!item1 || !item2 || item1.id === item2.id) return false;
+  
   const item1Right = item1.col + item1.colSpan - 1;
   const item1Bottom = item1.row + item1.rowSpan - 1;
   const item2Right = item2.col + item2.colSpan - 1;
   const item2Bottom = item2.row + item2.rowSpan - 1;
 
-  return !(item1.col > item2Right ||
-           item1Right < item2.col ||
-           item1.row > item2Bottom ||
-           item1Bottom < item2.row);
+  return !(item1.col > item2Right || item1Right < item2.col || 
+           item1.row > item2Bottom || item1Bottom < item2.row);
 };
 
-// Smart displacement algorithm
-const displaceItems = (items, newItem, excludeId = null, config) => {
-  const itemsToCheck = items.filter(item => item.id !== excludeId);
-  const displaced = [];
-
-  // Find overlapping items
-  const overlapping = itemsToCheck.filter(item => hasCollision(item, newItem));
-
-  // Displace overlapping items downward
-  overlapping.forEach(item => {
-    let newRow = newItem.row + newItem.rowSpan;
-
-    // Make sure displaced item fits in grid
-    if (newRow + item.rowSpan - 1 > config.rows) {
-      // If it doesn't fit, try moving it to the right
-      let newCol = newItem.col + newItem.colSpan;
-      if (newCol + item.colSpan - 1 <= config.columns) {
-        displaced.push({ ...item, col: newCol, row: newItem.row });
-      } else {
-        // If neither works, place it at the bottom
-        displaced.push({ ...item, row: newRow });
-      }
-    } else {
-      displaced.push({ ...item, row: newRow });
-    }
-  });
-
-  return displaced;
-};
-
-// Find available position for new item
-const findAvailablePosition = (items, item, config) => {
-  // Try to place at (1,1) first
-  for (let row = 1; row <= config.rows - item.rowSpan + 1; row++) {
-    for (let col = 1; col <= config.columns - item.colSpan + 1; col++) {
-      const testItem = { ...item, col, row };
-      const hasConflict = items.some(existingItem => hasCollision(testItem, existingItem));
-      
-      if (!hasConflict) {
-        return { col, row };
-      }
-    }
-  }
-
-  // If no space, return original position
-  return { col: item.col, row: item.row };
-};
-
-// Grid Provider Component
 const GridProvider = ({ children, initialConfig = {} }) => {
   const [config, setConfig] = useState({
     columns: 4,
@@ -88,42 +36,135 @@ const GridProvider = ({ children, initialConfig = {} }) => {
   });
 
   const [items, setItems] = useState([]);
+  const [selectedItems, setSelectedItems] = useState([]);
+  const [layoutMode, setLayoutMode] = useState('canvas');
 
-  const [dragState, setDragState] = useState({
-    isDragging: false,
-    draggedItem: null,
-    previewPosition: null
-  });
+  const cellDimensions = useMemo(() => {
+    const cellWidth = (workspaceSize.width - 32 - (config.columns - 1) * config.gap) / config.columns;
+    const cellHeight = (workspaceSize.height - 32 - (config.rows - 1) * config.gap) / config.rows;
+    return { cellWidth, cellHeight };
+  }, [workspaceSize, config]);
 
-  // Smart item placement with displacement
-  const placeItemSmart = (newItem, excludeId = null) => {
-    const displaced = displaceItems(items, newItem, excludeId, config);
+  const findAvailablePosition = useCallback((newItem) => {
+    const { colSpan = 1, rowSpan = 1 } = newItem;
+    
+    for (let row = 1; row <= config.rows - rowSpan + 1; row++) {
+      for (let col = 1; col <= config.columns - colSpan + 1; col++) {
+        const testItem = { ...newItem, col, row, colSpan, rowSpan };
+        const hasConflict = items.some(item => hasGridCollision(testItem, item));
+        
+        if (!hasConflict) {
+          return { col, row };
+        }
+      }
+    }
+    
+    return { col: 1, row: 1 };
+  }, [items, config]);
 
+  const addItem = useCallback((template) => {
+    const newItem = {
+      id: `item-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      createdAt: Date.now(),
+      ...template
+    };
+
+    if (layoutMode === 'canvas') {
+      newItem.x = template.x ?? Math.random() * (workspaceSize.width - (template.width || 200));
+      newItem.y = template.y ?? Math.random() * (workspaceSize.height - (template.height || 150));
+      newItem.width = template.width || 200;
+      newItem.height = template.height || 150;
+    } else {
+      newItem.colSpan = template.colSpan || 1;
+      newItem.rowSpan = template.rowSpan || 1;
+      
+      const position = findAvailablePosition(newItem);
+      newItem.col = position.col;
+      newItem.row = position.row;
+    }
+
+    setItems(prev => [...prev, newItem]);
+    return newItem;
+  }, [layoutMode, workspaceSize, findAvailablePosition]);
+
+  const selectItem = useCallback((itemId) => {
+    setSelectedItems([itemId]);
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectedItems([]);
+  }, []);
+
+  const updateItem = useCallback((itemId, updates) => {
     setItems(prev => {
-      let updatedItems = prev.filter(item => item.id !== excludeId);
-
-      // Remove items that will be displaced
-      displaced.forEach(displacedItem => {
-        updatedItems = updatedItems.filter(item => item.id !== displacedItem.id);
-      });
-
-      // Add the new item and displaced items
-      return [...updatedItems, newItem, ...displaced];
+      const itemIndex = prev.findIndex(item => item.id === itemId);
+      if (itemIndex === -1) return prev;
+      
+      const newItems = [...prev];
+      newItems[itemIndex] = { ...newItems[itemIndex], ...updates };
+      return newItems;
     });
-  };
+  }, []);
 
-  const value = {
+  const deleteItem = useCallback((itemId) => {
+    setItems(prev => prev.filter(item => item.id !== itemId));
+    setSelectedItems(prev => prev.filter(id => id !== itemId));
+  }, []);
+
+  const switchMode = useCallback((newMode) => {
+    if (newMode === layoutMode) return;
+    
+    setItems(prev => prev.map(item => {
+      if (newMode === 'grid') {
+        if (item.x !== undefined && item.y !== undefined) {
+          const col = Math.max(1, Math.min(config.columns, 
+            Math.round(item.x / (cellDimensions.cellWidth + config.gap)) + 1));
+          const row = Math.max(1, Math.min(config.rows, 
+            Math.round(item.y / (cellDimensions.cellHeight + config.gap)) + 1));
+          const colSpan = Math.max(1, Math.min(config.columns - col + 1,
+            Math.round((item.width || 200) / (cellDimensions.cellWidth + config.gap))));
+          const rowSpan = Math.max(1, Math.min(config.rows - row + 1,
+            Math.round((item.height || 150) / (cellDimensions.cellHeight + config.gap))));
+          
+          return { ...item, col, row, colSpan, rowSpan };
+        }
+      } else {
+        if (item.col !== undefined && item.row !== undefined) {
+          const x = (item.col - 1) * (cellDimensions.cellWidth + config.gap);
+          const y = (item.row - 1) * (cellDimensions.cellHeight + config.gap);
+          const width = item.colSpan * cellDimensions.cellWidth + (item.colSpan - 1) * config.gap;
+          const height = item.rowSpan * cellDimensions.cellHeight + (item.rowSpan - 1) * config.gap;
+          
+          return { ...item, x, y, width, height };
+        }
+      }
+      return item;
+    }));
+    
+    setLayoutMode(newMode);
+  }, [layoutMode, config, cellDimensions]);
+
+  const value = useMemo(() => ({
     config,
     setConfig,
     workspaceSize,
     setWorkspaceSize,
     items,
     setItems,
-    dragState,
-    setDragState,
-    placeItemSmart,
+    layoutMode,
+    setLayoutMode: switchMode,
+    cellDimensions,
+    selectedItems,
+    selectItem,
+    clearSelection,
+    addItem,
+    updateItem,
+    deleteItem,
     findAvailablePosition
-  };
+  }), [
+    config, workspaceSize, items, layoutMode, cellDimensions, selectedItems,
+    selectItem, clearSelection, addItem, updateItem, deleteItem, switchMode, findAvailablePosition
+  ]);
 
   return (
     <GridContext.Provider value={value}>
@@ -131,5 +172,6 @@ const GridProvider = ({ children, initialConfig = {} }) => {
     </GridContext.Provider>
   );
 };
+
 
 export default GridProvider;
