@@ -9,7 +9,10 @@ const GridItem = ({ item, isSelected }) => {
     layoutMode, 
     workspaceSize,
     config,
-    cellDimensions
+    cellDimensions,
+    isValidGridPosition,
+    pixelToGrid,
+    setDraggedItem
   } = useGrid();
   
   const itemRef = useRef(null);
@@ -17,34 +20,26 @@ const GridItem = ({ item, isSelected }) => {
   const [isResizing, setIsResizing] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-  const [currentPosition, setCurrentPosition] = useState({ 
-    x: item.x || 0, 
-    y: item.y || 0 
-  });
-  const [currentSize, setCurrentSize] = useState({
-    width: item.width || 200,
-    height: item.height || 150
-  });
-  const [gridDragStart, setGridDragStart] = useState(null);
+  const [initialDragPosition, setInitialDragPosition] = useState(null);
+  const [tempPosition, setTempPosition] = useState(null);
 
+  // Calculate z-index based on item type and state
+  const getZIndex = useMemo(() => {
+    const baseZIndex = item.type === 'text' ? 10000 : 1; // Text gets much higher base z-index
+    
+    if (isDragging) return baseZIndex + 9000;
+    if (isSelected) return baseZIndex + 1000;
+    if (isResizing) return baseZIndex + 500;
+    
+    return baseZIndex;
+  }, [item.type, isDragging, isSelected, isResizing]);
+
+  // Reset temp position when item position changes
   useEffect(() => {
-    if (!isDragging && !isResizing) {
-      setCurrentPosition({ x: item.x || 0, y: item.y || 0 });
-      setCurrentSize({ width: item.width || 200, height: item.height || 150 });
+    if (!isDragging) {
+      setTempPosition(null);
     }
-  }, [item.x, item.y, item.width, item.height, isDragging, isResizing]);
-
-  const getGridCellFromPosition = useCallback((x, y) => {
-    const col = Math.max(1, Math.min(config.columns, Math.ceil(x / (cellDimensions.cellWidth + config.gap))));
-    const row = Math.max(1, Math.min(config.rows, Math.ceil(y / (cellDimensions.cellHeight + config.gap))));
-    return { col, row };
-  }, [config, cellDimensions]);
-
-  const getGridSpanFromSize = useCallback((width, height) => {
-    const colSpan = Math.max(1, Math.min(config.columns, Math.ceil(width / (cellDimensions.cellWidth + config.gap))));
-    const rowSpan = Math.max(1, Math.min(config.rows, Math.ceil(height / (cellDimensions.cellHeight + config.gap))));
-    return { colSpan, rowSpan };
-  }, [config, cellDimensions]);
+  }, [item.x, item.y, item.col, item.row, isDragging]);
 
   const handleMouseDown = useCallback((e) => {
     if (e.target.classList.contains('no-drag')) return;
@@ -58,123 +53,167 @@ const GridItem = ({ item, isSelected }) => {
     
     const workspaceRect = workspaceElement.getBoundingClientRect();
     
-    setDragOffset({
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top
-    });
+    const offsetX = e.clientX - rect.left;
+    const offsetY = e.clientY - rect.top;
+    
+    setDragOffset({ x: offsetX, y: offsetY });
+    setIsDragging(true);
+    selectItem(item.id);
+    setDraggedItem(item.id);
     
     if (layoutMode === 'grid') {
-      setGridDragStart({
+      setInitialDragPosition({
         col: item.col,
         row: item.row,
-        mouseX: e.clientX - workspaceRect.left - 16,
-        mouseY: e.clientY - workspaceRect.top - 16
+        mouseStartX: e.clientX - workspaceRect.left - 16,
+        mouseStartY: e.clientY - workspaceRect.top - 16
       });
     }
     
-    setIsDragging(true);
-    selectItem(item.id);
-    
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'grabbing';
-  }, [item.id, item.col, item.row, selectItem, layoutMode]);
+  }, [item.id, item.col, item.row, selectItem, layoutMode, setDraggedItem]);
 
   const handleMouseMove = useCallback((e) => {
-    if (!isDragging) return;
+    if (!isDragging || !initialDragPosition && layoutMode === 'grid') return;
     
     const workspaceElement = itemRef.current?.closest('[data-workspace]');
     if (!workspaceElement) return;
     
     const workspaceRect = workspaceElement.getBoundingClientRect();
+    const workspaceX = e.clientX - workspaceRect.left - 16;
+    const workspaceY = e.clientY - workspaceRect.top - 16;
     
     if (layoutMode === 'canvas') {
       const newX = Math.max(0, Math.min(
-        workspaceSize.width - currentSize.width,
-        e.clientX - workspaceRect.left - 16 - dragOffset.x
+        workspaceSize.width - (item.width || 200),
+        workspaceX - dragOffset.x
       ));
       
       const newY = Math.max(0, Math.min(
-        workspaceSize.height - currentSize.height,
-        e.clientY - workspaceRect.top - 16 - dragOffset.y
+        workspaceSize.height - (item.height || 150),
+        workspaceY - dragOffset.y
       ));
       
-      setCurrentPosition({ x: newX, y: newY });
+      setTempPosition({ x: newX, y: newY });
       
+      // Apply temporary visual position
       if (itemRef.current) {
         itemRef.current.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
+        itemRef.current.style.zIndex = getZIndex;
+        itemRef.current.style.boxShadow = '0 10px 25px rgba(0,0,0,0.15)';
       }
-    } else if (layoutMode === 'grid' && gridDragStart) {
-      const currentMouseX = e.clientX - workspaceRect.left - 16;
-      const currentMouseY = e.clientY - workspaceRect.top - 16;
+    } else if (layoutMode === 'grid' && initialDragPosition) {
+      // Calculate grid position based on mouse movement
+      const deltaX = workspaceX - initialDragPosition.mouseStartX;
+      const deltaY = workspaceY - initialDragPosition.mouseStartY;
       
-      const deltaX = currentMouseX - gridDragStart.mouseX;
-      const deltaY = currentMouseY - gridDragStart.mouseY;
+      const cellWidth = cellDimensions.cellWidth + config.gap;
+      const cellHeight = cellDimensions.cellHeight + config.gap;
       
-      const colDelta = Math.round(deltaX / (cellDimensions.cellWidth + config.gap));
-      const rowDelta = Math.round(deltaY / (cellDimensions.cellHeight + config.gap));
+      const colDelta = Math.round(deltaX / cellWidth);
+      const rowDelta = Math.round(deltaY / cellHeight);
       
-      const newCol = Math.max(1, Math.min(config.columns - item.colSpan + 1, gridDragStart.col + colDelta));
-      const newRow = Math.max(1, Math.min(config.rows - item.rowSpan + 1, gridDragStart.row + rowDelta));
+      const newCol = Math.max(1, Math.min(
+        config.columns - item.colSpan + 1, 
+        initialDragPosition.col + colDelta
+      ));
+      const newRow = Math.max(1, Math.min(
+        config.rows - item.rowSpan + 1, 
+        initialDragPosition.row + rowDelta
+      ));
       
+      // Only update visual position if it's different from current
       if (newCol !== item.col || newRow !== item.row) {
+        setTempPosition({ col: newCol, row: newRow });
+        
+        // Apply temporary visual position
         if (itemRef.current) {
           itemRef.current.style.gridColumn = `${newCol} / span ${item.colSpan}`;
           itemRef.current.style.gridRow = `${newRow} / span ${item.rowSpan}`;
-          itemRef.current.style.zIndex = '1000';
+          itemRef.current.style.zIndex = getZIndex;
           itemRef.current.style.boxShadow = '0 10px 25px rgba(0,0,0,0.15)';
+          
+          // Visual feedback for invalid positions (only for non-text items)
+          const isValid = isValidGridPosition(newCol, newRow, item.colSpan, item.rowSpan, item.id, item.type);
+          itemRef.current.style.opacity = isValid || item.type === 'text' ? '1' : '0.6';
+          itemRef.current.style.backgroundColor = isValid || item.type === 'text' ? '' : 'rgba(255, 0, 0, 0.1)';
         }
       }
     }
-  }, [isDragging, dragOffset, workspaceSize, currentSize, layoutMode, gridDragStart, cellDimensions, config, item.col, item.row, item.colSpan, item.rowSpan]);
+  }, [isDragging, initialDragPosition, workspaceSize, dragOffset, layoutMode, cellDimensions, config, item, isValidGridPosition, getZIndex]);
 
   const handleMouseUp = useCallback(() => {
     if (!isDragging) return;
     
     setIsDragging(false);
+    setDraggedItem(null);
     document.body.style.userSelect = '';
     document.body.style.cursor = '';
     
-    if (layoutMode === 'canvas') {
-      updateItem(item.id, { 
-        x: currentPosition.x, 
-        y: currentPosition.y 
-      });
-    } else if (layoutMode === 'grid' && gridDragStart) {
-      const workspaceElement = itemRef.current?.closest('[data-workspace]');
-      if (workspaceElement) {
-        const workspaceRect = workspaceElement.getBoundingClientRect();
-        
-        // Calculate the final position
-        const deltaX = (window.event?.clientX || 0) - workspaceRect.left - 16 - gridDragStart.mouseX;
-        const deltaY = (window.event?.clientY || 0) - workspaceRect.top - 16 - gridDragStart.mouseY;
-        
-        const colDelta = Math.round(deltaX / (cellDimensions.cellWidth + config.gap));
-        const rowDelta = Math.round(deltaY / (cellDimensions.cellHeight + config.gap));
-        
-        const newCol = Math.max(1, Math.min(config.columns - item.colSpan + 1, gridDragStart.col + colDelta));
-        const newRow = Math.max(1, Math.min(config.rows - item.rowSpan + 1, gridDragStart.row + rowDelta));
-        
-        updateItem(item.id, { col: newCol, row: newRow });
-        
-        // Reset visual styles
-        if (itemRef.current) {
-          itemRef.current.style.zIndex = '';
-          itemRef.current.style.boxShadow = '';
+    // Reset visual styles
+    if (itemRef.current) {
+      itemRef.current.style.zIndex = getZIndex;
+      itemRef.current.style.boxShadow = '';
+      itemRef.current.style.opacity = '';
+      itemRef.current.style.backgroundColor = '';
+    }
+    
+    if (tempPosition) {
+      if (layoutMode === 'canvas') {
+        updateItem(item.id, { 
+          x: tempPosition.x, 
+          y: tempPosition.y 
+        });
+      } else if (layoutMode === 'grid') {
+        // Text items can always be placed anywhere, other items need valid position
+        if (item.type === 'text') {
+          updateItem(item.id, { 
+            col: tempPosition.col, 
+            row: tempPosition.row 
+          });
+        } else {
+          const isValid = isValidGridPosition(
+            tempPosition.col, 
+            tempPosition.row, 
+            item.colSpan, 
+            item.rowSpan, 
+            item.id,
+            item.type
+          );
+          
+          if (isValid) {
+            updateItem(item.id, { 
+              col: tempPosition.col, 
+              row: tempPosition.row 
+            });
+          } else {
+            // Reset to original position if invalid
+            if (itemRef.current) {
+              itemRef.current.style.gridColumn = `${item.col} / span ${item.colSpan}`;
+              itemRef.current.style.gridRow = `${item.row} / span ${item.rowSpan}`;
+            }
+          }
         }
       }
-      
-      setGridDragStart(null);
     }
-  }, [isDragging, currentPosition, item.id, updateItem, layoutMode, gridDragStart, cellDimensions, config, item.colSpan, item.rowSpan]);
+    
+    setTempPosition(null);
+    setInitialDragPosition(null);
+  }, [isDragging, tempPosition, item.id, item.col, item.row, item.colSpan, item.rowSpan, item.type,
+      updateItem, layoutMode, isValidGridPosition, setDraggedItem, getZIndex]);
 
   useEffect(() => {
     if (isDragging) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
+      const handleGlobalMouseMove = (e) => handleMouseMove(e);
+      const handleGlobalMouseUp = () => handleMouseUp();
+      
+      document.addEventListener('mousemove', handleGlobalMouseMove, { passive: false });
+      document.addEventListener('mouseup', handleGlobalMouseUp);
       
       return () => {
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
+        document.removeEventListener('mousemove', handleGlobalMouseMove);
+        document.removeEventListener('mouseup', handleGlobalMouseUp);
       };
     }
   }, [isDragging, handleMouseMove, handleMouseUp]);
@@ -216,88 +255,179 @@ const GridItem = ({ item, isSelected }) => {
     }
   }, []);
 
-  const handleGridResize = useCallback((direction, delta) => {
-    let newColSpan = item.colSpan;
-    let newRowSpan = item.rowSpan;
-    let newCol = item.col;
-    let newRow = item.row;
-
-    switch (direction) {
-      case 'right':
-        newColSpan = Math.max(1, Math.min(config.columns - item.col + 1, item.colSpan + delta));
-        break;
-      case 'bottom':
-        newRowSpan = Math.max(1, Math.min(config.rows - item.row + 1, item.rowSpan + delta));
-        break;
-      case 'left':
-        const leftDelta = Math.max(-item.colSpan + 1, Math.min(item.col - 1, -delta));
-        newCol = item.col + leftDelta;
-        newColSpan = item.colSpan - leftDelta;
-        break;
-      case 'top':
-        const topDelta = Math.max(-item.rowSpan + 1, Math.min(item.row - 1, -delta));
-        newRow = item.row + topDelta;
-        newRowSpan = item.rowSpan - topDelta;
-        break;
-    }
-
-    updateItem(item.id, { 
-      col: newCol, 
-      row: newRow, 
-      colSpan: newColSpan, 
-      rowSpan: newRowSpan 
-    });
-  }, [item, config, updateItem]);
-
-  const handleResizeStart = useCallback((e, direction) => {
+  // Text-specific font size resize handler - FIXED DIRECTION
+  const handleTextFontResize = useCallback((direction, e) => {
     e.preventDefault();
     e.stopPropagation();
+    
+    if (item.type !== 'text') return;
+    
+    let resizing = true;
+    const startY = e.clientY;
+    const currentFontSize = parseInt(item.textStyle?.fontSize || item.style?.fontSize || 16);
+    
+    const handleMouseMove = (e) => {
+      if (!resizing) return;
+      
+      const deltaY = e.clientY - startY;
+      // FIXED: Moving up (negative deltaY) should increase font size
+      const fontSizeChange = Math.round(deltaY / 3); // Positive deltaY = moving down = smaller font
+      const newFontSize = Math.max(8, Math.min(200, currentFontSize - fontSizeChange));
+      
+      // Update font size in real time
+      updateItem(item.id, {
+        textStyle: {
+          ...(item.textStyle || {}),
+          fontSize: newFontSize
+        },
+        style: {
+          ...(item.style || {}),
+          fontSize: newFontSize
+        }
+      });
+    };
+    
+    const handleMouseUp = () => {
+      resizing = false;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+    };
+    
+    document.body.style.cursor = 'ns-resize';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [item, updateItem]);
+
+  const handleGridResize = useCallback((direction, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // For text items, handle font size resize instead
+    if (item.type === 'text') {
+      handleTextFontResize(direction, e);
+      return;
+    }
+    
+    let resizing = true;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    
+    const handleMouseMove = (e) => {
+      if (!resizing) return;
+      
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
+      const cellWidth = cellDimensions.cellWidth + config.gap;
+      const cellHeight = cellDimensions.cellHeight + config.gap;
+      
+      let newColSpan = item.colSpan;
+      let newRowSpan = item.rowSpan;
+      let newCol = item.col;
+      let newRow = item.row;
+
+      switch (direction) {
+        case 'right':
+          newColSpan = Math.max(1, Math.min(
+            config.columns - item.col + 1, 
+            item.colSpan + Math.round(deltaX / cellWidth)
+          ));
+          break;
+        case 'bottom':
+          newRowSpan = Math.max(1, Math.min(
+            config.rows - item.row + 1, 
+            item.rowSpan + Math.round(deltaY / cellHeight)
+          ));
+          break;
+        case 'left':
+          const leftColDelta = Math.round(-deltaX / cellWidth);
+          const maxLeftExpand = Math.min(leftColDelta, item.col - 1);
+          newCol = item.col - maxLeftExpand;
+          newColSpan = item.colSpan + maxLeftExpand;
+          break;
+        case 'top':
+          const topRowDelta = Math.round(-deltaY / cellHeight);
+          const maxTopExpand = Math.min(topRowDelta, item.row - 1);
+          newRow = item.row - maxTopExpand;
+          newRowSpan = item.rowSpan + maxTopExpand;
+          break;
+      }
+
+      // Check if new dimensions are valid
+      if (isValidGridPosition(newCol, newRow, newColSpan, newRowSpan, item.id, item.type)) {
+        updateItem(item.id, { 
+          col: newCol, 
+          row: newRow, 
+          colSpan: newColSpan, 
+          rowSpan: newRowSpan 
+        }, true); // Skip validation since we already checked
+      }
+    };
+    
+    const handleMouseUp = () => {
+      resizing = false;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [item, cellDimensions, config, isValidGridPosition, updateItem, handleTextFontResize]);
+
+  const handleCanvasResize = useCallback((e, direction) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // For text items, handle font size resize instead
+    if (item.type === 'text') {
+      handleTextFontResize(direction, e);
+      return;
+    }
     
     setIsResizing(direction);
     selectItem(item.id);
     document.body.style.userSelect = 'none';
-  }, [item.id, selectItem]);
-
-  const handleResizeMove = useCallback((e) => {
-    if (!isResizing) return;
     
-    if (layoutMode === 'canvas') {
-      const workspaceElement = itemRef.current?.closest('[data-workspace]');
-      if (!workspaceElement) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startWidth = item.width || 200;
+    const startHeight = item.height || 150;
+    const startPosX = item.x || 0;
+    const startPosY = item.y || 0;
+    
+    const handleMouseMove = (e) => {
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
       
-      const workspaceRect = workspaceElement.getBoundingClientRect();
+      let newWidth = startWidth;
+      let newHeight = startHeight;
+      let newX = startPosX;
+      let newY = startPosY;
       
-      let newWidth = currentSize.width;
-      let newHeight = currentSize.height;
-      let newX = currentPosition.x;
-      let newY = currentPosition.y;
-      
-      const mouseX = e.clientX - workspaceRect.left - 16;
-      const mouseY = e.clientY - workspaceRect.top - 16;
-      
-      switch (isResizing) {
+      switch (direction) {
         case 'se':
-          newWidth = Math.max(50, Math.min(workspaceSize.width - currentPosition.x, mouseX - currentPosition.x));
-          newHeight = Math.max(40, Math.min(workspaceSize.height - currentPosition.y, mouseY - currentPosition.y));
+          newWidth = Math.max(50, Math.min(workspaceSize.width - startPosX, startWidth + deltaX));
+          newHeight = Math.max(40, Math.min(workspaceSize.height - startPosY, startHeight + deltaY));
           break;
         case 'sw':
-          newWidth = Math.max(50, currentPosition.x + currentSize.width - mouseX);
-          newHeight = Math.max(40, Math.min(workspaceSize.height - currentPosition.y, mouseY - currentPosition.y));
-          newX = Math.min(currentPosition.x, mouseX);
+          newWidth = Math.max(50, startWidth - deltaX);
+          newHeight = Math.max(40, Math.min(workspaceSize.height - startPosY, startHeight + deltaY));
+          newX = Math.min(startPosX, startPosX + startWidth - newWidth);
           break;
         case 'ne':
-          newWidth = Math.max(50, Math.min(workspaceSize.width - currentPosition.x, mouseX - currentPosition.x));
-          newHeight = Math.max(40, currentPosition.y + currentSize.height - mouseY);
-          newY = Math.min(currentPosition.y, mouseY);
+          newWidth = Math.max(50, Math.min(workspaceSize.width - startPosX, startWidth + deltaX));
+          newHeight = Math.max(40, startHeight - deltaY);
+          newY = Math.min(startPosY, startPosY + startHeight - newHeight);
           break;
         case 'nw':
-          newWidth = Math.max(50, currentPosition.x + currentSize.width - mouseX);
-          newHeight = Math.max(40, currentPosition.y + currentSize.height - mouseY);
-          newX = Math.min(currentPosition.x, mouseX);
-          newY = Math.min(currentPosition.y, mouseY);
+          newWidth = Math.max(50, startWidth - deltaX);
+          newHeight = Math.max(40, startHeight - deltaY);
+          newX = Math.min(startPosX, startPosX + startWidth - newWidth);
+          newY = Math.min(startPosY, startPosY + startHeight - newHeight);
           break;
       }
       
+      // Maintain aspect ratio for images
       if (item.type === 'image' && item.aspectRatio) {
         const ratio = newWidth / newHeight;
         if (Math.abs(ratio - item.aspectRatio) > 0.1) {
@@ -309,72 +439,76 @@ const GridItem = ({ item, isSelected }) => {
         }
       }
       
-      setCurrentSize({ width: newWidth, height: newHeight });
-      setCurrentPosition({ x: newX, y: newY });
-      
+      // Apply visual changes immediately
       if (itemRef.current) {
         itemRef.current.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
         itemRef.current.style.width = `${newWidth}px`;
         itemRef.current.style.height = `${newHeight}px`;
+        itemRef.current.style.zIndex = getZIndex;
       }
-    }
-  }, [isResizing, currentSize, currentPosition, workspaceSize, item.type, item.aspectRatio, layoutMode]);
-
-  const handleResizeEnd = useCallback(() => {
-    if (!isResizing) return;
-    
-    setIsResizing(false);
-    document.body.style.userSelect = '';
-    document.body.style.cursor = '';
-    
-    if (layoutMode === 'canvas') {
-      updateItem(item.id, {
-        x: currentPosition.x,
-        y: currentPosition.y,
-        width: currentSize.width,
-        height: currentSize.height
-      });
-    }
-  }, [isResizing, currentPosition, currentSize, item.id, updateItem, layoutMode]);
-
-  useEffect(() => {
-    if (isResizing && layoutMode === 'canvas') {
-      document.addEventListener('mousemove', handleResizeMove);
-      document.addEventListener('mouseup', handleResizeEnd);
       
-      return () => {
-        document.removeEventListener('mousemove', handleResizeMove);
-        document.removeEventListener('mouseup', handleResizeEnd);
-      };
-    }
-  }, [isResizing, handleResizeMove, handleResizeEnd, layoutMode]);
+      setTempPosition({ x: newX, y: newY, width: newWidth, height: newHeight });
+    };
+    
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      
+      if (tempPosition && (tempPosition.width || tempPosition.height)) {
+        updateItem(item.id, {
+          x: tempPosition.x,
+          y: tempPosition.y,
+          width: tempPosition.width,
+          height: tempPosition.height
+        });
+      }
+      
+      setTempPosition(null);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [item, workspaceSize, selectItem, updateItem, tempPosition, handleTextFontResize, getZIndex]);
 
   const gridContainerStyle = useMemo(() => {
     if (layoutMode === 'canvas') return {};
     
+    // Use temp position during drag if available
+    const currentCol = tempPosition?.col ?? item.col;
+    const currentRow = tempPosition?.row ?? item.row;
+    
     return {
-      gridColumn: `${item.col} / span ${item.colSpan}`,
-      gridRow: `${item.row} / span ${item.rowSpan}`,
+      gridColumn: `${currentCol} / span ${item.colSpan}`,
+      gridRow: `${currentRow} / span ${item.rowSpan}`,
       position: 'relative',
+      zIndex: getZIndex, // Add z-index here for grid mode
     };
-  }, [layoutMode, item]);
+  }, [layoutMode, item, tempPosition, getZIndex]);
 
   const canvasStyle = useMemo(() => {
     if (layoutMode !== 'canvas') return {};
+    
+    // Use temp position during drag if available
+    const currentX = tempPosition?.x ?? item.x ?? 0;
+    const currentY = tempPosition?.y ?? item.y ?? 0;
+    const currentWidth = tempPosition?.width ?? item.width ?? 200;
+    const currentHeight = tempPosition?.height ?? item.height ?? 150;
     
     return {
       position: 'absolute',
       left: 0,
       top: 0,
-      width: `${currentSize.width}px`,
-      height: `${currentSize.height}px`,
-      transform: `translate3d(${currentPosition.x}px, ${currentPosition.y}px, 0)`,
-      zIndex: isDragging || isSelected ? 1000 : 1,
-      cursor: isSelected && !isResizing ? (isDragging ? 'grabbing' : 'grab') : 'pointer',
-      willChange: isDragging || isResizing ? 'transform' : 'auto',
+      width: `${currentWidth}px`,
+      height: `${currentHeight}px`,
+      transform: `translate3d(${currentX}px, ${currentY}px, 0)`,
+      zIndex: getZIndex, // Dynamic z-index based on type and state
+      cursor: isSelected ? (isDragging ? 'grabbing' : 'grab') : 'pointer',
       transition: isDragging || isResizing ? 'none' : 'all 0.2s ease',
     };
-  }, [layoutMode, currentSize, currentPosition, isDragging, isSelected, isResizing]);
+  }, [layoutMode, item, tempPosition, isDragging, isSelected, isResizing, getZIndex]);
 
   const renderContent = () => {
     if (item.type === 'text') {
@@ -451,7 +585,7 @@ const GridItem = ({ item, isSelected }) => {
             className="w-full h-full object-cover rounded-md no-drag"
             controls
             draggable={false}
-            style={{ pointerEvents: isDragging || isResizing ? 'none' : 'auto' }}
+            style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
           />
           <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity duration-200">
             {item.content}
@@ -466,13 +600,112 @@ const GridItem = ({ item, isSelected }) => {
         <div className="text-xs text-gray-500 bg-white/60 rounded-full px-2 py-1">
           {layoutMode === 'grid' 
             ? `${item.colSpan} × ${item.rowSpan}` 
-            : `${Math.round(currentSize.width)}×${Math.round(currentSize.height)}`
+            : `${Math.round(item.width || 200)}×${Math.round(item.height || 150)}`
           }
         </div>
       </div>
     );
   };
 
+  // Special rendering for text items - no visible container
+  if (item.type === 'text') {
+    const textFontSize = parseInt(item.textStyle?.fontSize || item.style?.fontSize || 16);
+    const textContent = item.text || item.content || 'Double click to edit text';
+    
+    const textStyle = {
+      fontSize: `${textFontSize}px`,
+      fontWeight: item.textStyle?.fontWeight || item.style?.fontWeight || 'normal',
+      textAlign: item.textStyle?.textAlign || item.style?.textAlign || 'left',
+      color: item.textStyle?.color || item.style?.color || '#000000',
+      backgroundColor: item.textStyle?.backgroundColor || item.style?.backgroundColor || 'transparent',
+      padding: isSelected ? '4px' : '0px',
+      border: isSelected ? '1px dashed rgba(59, 130, 246, 0.5)' : 'none',
+      borderRadius: '4px',
+      minWidth: '50px',
+      minHeight: `${textFontSize + 8}px`,
+      width: 'auto',
+      height: 'auto',
+      maxWidth: layoutMode === 'canvas' ? `${workspaceSize.width}px` : '100%',
+      whiteSpace: 'pre-wrap',
+      wordWrap: 'break-word',
+      cursor: isDragging ? 'grabbing' : (isSelected ? 'grab' : 'text'),
+      outline: 'none',
+      resize: 'none',
+      overflow: 'visible',
+      transition: isDragging || isResizing ? 'none' : 'all 0.2s ease',
+      zIndex: getZIndex, // High z-index for text
+      position: layoutMode === 'canvas' ? 'absolute' : 'relative'
+    };
+
+    if (layoutMode === 'canvas') {
+      const currentX = tempPosition?.x ?? item.x ?? 0;
+      const currentY = tempPosition?.y ?? item.y ?? 0;
+      textStyle.transform = `translate3d(${currentX}px, ${currentY}px, 0)`;
+      textStyle.left = 0;
+      textStyle.top = 0;
+    }
+
+    if (layoutMode === 'grid') {
+      const currentCol = tempPosition?.col ?? item.col;
+      const currentRow = tempPosition?.row ?? item.row;
+      textStyle.gridColumn = `${currentCol} / span ${item.colSpan}`;
+      textStyle.gridRow = `${currentRow} / span ${item.rowSpan}`;
+    }
+
+    return (
+      <div
+        ref={itemRef}
+        style={textStyle}
+        onMouseDown={handleMouseDown}
+        onClick={handleClick}
+        onDoubleClick={handleTextDoubleClick}
+      >
+        {isSelected && (
+          <button
+            onClick={handleDelete}
+            className="absolute -top-6 -right-2 w-6 h-6 bg-white border border-gray-300 hover:bg-red-50 hover:border-red-300 text-gray-600 hover:text-red-600 rounded-full flex items-center justify-center z-30 no-drag shadow-sm"
+          >
+            ×
+          </button>
+        )}
+
+        {/* Font size resize handle for text */}
+        {isSelected && (
+          <div
+            className="absolute -bottom-2 -right-2 w-4 h-4 bg-blue-500 border-2 border-white rounded-full cursor-ns-resize opacity-80 hover:opacity-100 no-drag shadow-sm"
+            onMouseDown={(e) => handleTextFontResize('resize', e)}
+            title="Drag up to increase font size, down to decrease"
+          />
+        )}
+
+        {isEditing ? (
+          <textarea
+            className="no-drag w-full h-full bg-transparent border-none outline-none resize-none"
+            style={{
+              fontSize: textStyle.fontSize,
+              fontWeight: textStyle.fontWeight,
+              textAlign: textStyle.textAlign,
+              color: textStyle.color,
+              backgroundColor: 'transparent',
+              padding: '0',
+              minHeight: `${textFontSize + 8}px`,
+              overflow: 'hidden'
+            }}
+            value={textContent}
+            onChange={handleTextChange}
+            onBlur={handleTextBlur}
+            onKeyDown={handleTextKeyDown}
+            autoFocus
+            placeholder="Enter your text..."
+          />
+        ) : (
+          textContent
+        )}
+      </div>
+    );
+  }
+
+  // Regular rendering for non-text items
   if (layoutMode === 'grid') {
     return (
       <div
@@ -500,221 +733,29 @@ const GridItem = ({ item, isSelected }) => {
         {/* Grid resize handles */}
         {isSelected && (
           <>
-            {/* Left resize handle */}
+            {/* Side resize handles */}
             <div
               className="absolute top-1/2 -left-1 w-2 h-8 bg-blue-500 cursor-col-resize opacity-80 hover:opacity-100 no-drag"
               style={{ transform: 'translateY(-50%)', borderRadius: '4px 0 0 4px' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startX = e.clientX;
-                
-                const handleMouseMove = (e) => {
-                  const deltaX = e.clientX - startX;
-                  const cellDelta = Math.round(-deltaX / (cellDimensions.cellWidth + config.gap));
-                  handleGridResize('left', cellDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
+              onMouseDown={(e) => handleGridResize('left', e)}
             />
 
-            {/* Right resize handle */}
             <div
               className="absolute top-1/2 -right-1 w-2 h-8 bg-blue-500 cursor-col-resize opacity-80 hover:opacity-100 no-drag"
               style={{ transform: 'translateY(-50%)', borderRadius: '0 4px 4px 0' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startX = e.clientX;
-                
-                const handleMouseMove = (e) => {
-                  const deltaX = e.clientX - startX;
-                  const cellDelta = Math.round(deltaX / (cellDimensions.cellWidth + config.gap));
-                  handleGridResize('right', cellDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
+              onMouseDown={(e) => handleGridResize('right', e)}
             />
 
-            {/* Top resize handle */}
             <div
               className="absolute left-1/2 -top-1 w-8 h-2 bg-blue-500 cursor-row-resize opacity-80 hover:opacity-100 no-drag"
               style={{ transform: 'translateX(-50%)', borderRadius: '4px 4px 0 0' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startY = e.clientY;
-                
-                const handleMouseMove = (e) => {
-                  const deltaY = e.clientY - startY;
-                  const cellDelta = Math.round(-deltaY / (cellDimensions.cellHeight + config.gap));
-                  handleGridResize('top', cellDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
+              onMouseDown={(e) => handleGridResize('top', e)}
             />
             
-            {/* Bottom resize handle */}
             <div
               className="absolute left-1/2 -bottom-1 w-8 h-2 bg-blue-500 cursor-row-resize opacity-80 hover:opacity-100 no-drag"
               style={{ transform: 'translateX(-50%)', borderRadius: '0 0 4px 4px' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startY = e.clientY;
-                
-                const handleMouseMove = (e) => {
-                  const deltaY = e.clientY - startY;
-                  const cellDelta = Math.round(deltaY / (cellDimensions.cellHeight + config.gap));
-                  handleGridResize('bottom', cellDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
-            />
-            
-            {/* Corner resize handles */}
-            <div
-              className="absolute -top-1 -left-1 w-3 h-3 bg-blue-500 cursor-nw-resize opacity-80 hover:opacity-100 no-drag"
-              style={{ borderRadius: '4px 0 0 0' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startX = e.clientX;
-                const startY = e.clientY;
-                
-                const handleMouseMove = (e) => {
-                  const deltaX = e.clientX - startX;
-                  const deltaY = e.clientY - startY;
-                  const colDelta = Math.round(-deltaX / (cellDimensions.cellWidth + config.gap));
-                  const rowDelta = Math.round(-deltaY / (cellDimensions.cellHeight + config.gap));
-                  
-                  handleGridResize('left', colDelta);
-                  handleGridResize('top', rowDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
-            />
-
-            <div
-              className="absolute -top-1 -right-1 w-3 h-3 bg-blue-500 cursor-ne-resize opacity-80 hover:opacity-100 no-drag"
-              style={{ borderRadius: '0 4px 0 0' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startX = e.clientX;
-                const startY = e.clientY;
-                
-                const handleMouseMove = (e) => {
-                  const deltaX = e.clientX - startX;
-                  const deltaY = e.clientY - startY;
-                  const colDelta = Math.round(deltaX / (cellDimensions.cellWidth + config.gap));
-                  const rowDelta = Math.round(-deltaY / (cellDimensions.cellHeight + config.gap));
-                  
-                  handleGridResize('right', colDelta);
-                  handleGridResize('top', rowDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
-            />
-
-            <div
-              className="absolute -bottom-1 -left-1 w-3 h-3 bg-blue-500 cursor-sw-resize opacity-80 hover:opacity-100 no-drag"
-              style={{ borderRadius: '0 0 0 4px' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startX = e.clientX;
-                const startY = e.clientY;
-                
-                const handleMouseMove = (e) => {
-                  const deltaX = e.clientX - startX;
-                  const deltaY = e.clientY - startY;
-                  const colDelta = Math.round(-deltaX / (cellDimensions.cellWidth + config.gap));
-                  const rowDelta = Math.round(deltaY / (cellDimensions.cellHeight + config.gap));
-                  
-                  handleGridResize('left', colDelta);
-                  handleGridResize('bottom', rowDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
-            />
-            
-            <div
-              className="absolute -bottom-1 -right-1 w-3 h-3 bg-blue-500 cursor-se-resize opacity-80 hover:opacity-100 no-drag"
-              style={{ borderRadius: '0 0 4px 0' }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const startX = e.clientX;
-                const startY = e.clientY;
-                
-                const handleMouseMove = (e) => {
-                  const deltaX = e.clientX - startX;
-                  const deltaY = e.clientY - startY;
-                  const colDelta = Math.round(deltaX / (cellDimensions.cellWidth + config.gap));
-                  const rowDelta = Math.round(deltaY / (cellDimensions.cellHeight + config.gap));
-                  
-                  handleGridResize('right', colDelta);
-                  handleGridResize('bottom', rowDelta);
-                };
-                
-                const handleMouseUp = () => {
-                  document.removeEventListener('mousemove', handleMouseMove);
-                  document.removeEventListener('mouseup', handleMouseUp);
-                };
-                
-                document.addEventListener('mousemove', handleMouseMove);
-                document.addEventListener('mouseup', handleMouseUp);
-              }}
+              onMouseDown={(e) => handleGridResize('bottom', e)}
             />
           </>
         )}
@@ -726,6 +767,7 @@ const GridItem = ({ item, isSelected }) => {
     );
   }
 
+  // Canvas mode rendering
   return (
     <div
       ref={itemRef}
@@ -747,23 +789,24 @@ const GridItem = ({ item, isSelected }) => {
         </button>
       )}
 
-      {isSelected && layoutMode === 'canvas' && (
+      {/* Canvas resize handles */}
+      {isSelected && (
         <>
           <div
             className="absolute -top-1 -left-1 w-3 h-3 bg-blue-500 border-2 border-white rounded-full cursor-nw-resize no-drag"
-            onMouseDown={(e) => handleResizeStart(e, 'nw')}
+            onMouseDown={(e) => handleCanvasResize(e, 'nw')}
           />
           <div
             className="absolute -top-1 -right-1 w-3 h-3 bg-blue-500 border-2 border-white rounded-full cursor-ne-resize no-drag"
-            onMouseDown={(e) => handleResizeStart(e, 'ne')}
+            onMouseDown={(e) => handleCanvasResize(e, 'ne')}
           />
           <div
             className="absolute -bottom-1 -left-1 w-3 h-3 bg-blue-500 border-2 border-white rounded-full cursor-sw-resize no-drag"
-            onMouseDown={(e) => handleResizeStart(e, 'sw')}
+            onMouseDown={(e) => handleCanvasResize(e, 'sw')}
           />
           <div
             className="absolute -bottom-1 -right-1 w-3 h-3 bg-blue-500 border-2 border-white rounded-full cursor-se-resize no-drag"
-            onMouseDown={(e) => handleResizeStart(e, 'se')}
+            onMouseDown={(e) => handleCanvasResize(e, 'se')}
           />
         </>
       )}
